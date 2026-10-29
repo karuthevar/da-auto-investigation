@@ -30,26 +30,26 @@ This project provisions an Amazon EC2 instance with the CloudWatch Agent and OS-
 ```mermaid
 flowchart TD
     subgraph Load["1. Chaos Load Injection"]
-        L1["LoadInducer Lambda"] -->|ssm:SendCommand| SSM_LOAD["SSM Runbook: InduceOSLoad"]
-        SSM_LOAD -->|Stage 1: Memory -> Stage 2: Swap -> Stage 3: Disk -> Stage 4: EBS I/O| EC2["Target EC2 Instance (AL2023 + 1.5GB Swap)"]
+        L1["LoadInducer Lambda"] -->|"ssm:SendCommand"| SSM_LOAD["SSM Runbook: InduceOSLoad"]
+        SSM_LOAD -->|"Stage 1: Memory -> Stage 2: Swap -> Stage 3: Disk -> Stage 4: EBS I/O"| EC2["Target EC2 Instance (AL2023 + 1.5GB Swap)"]
     end
 
     subgraph Telemetry["2. High-Resolution Telemetry & Threshold Breach"]
-        EC2 -->|10s OS Metrics & Forensic Logs| CWA["CloudWatch Agent (OOMScoreAdjust=-1000)"]
-        CWA -->|Namespace: CWAgent| CWM["CloudWatch Metrics (mem, swap, disk, diskio, iowait)"]
-        CWA -->|Stream: {instance_id}/forensic-dumps| CWL["CloudWatch Logs (/aws/ec2/.../os-forensics)"]
-        CWM -->|Threshold Breached| ALARMS["5 CloudWatch OS Alarms"]
-        ALARMS -->|ALARM Notification| SNS["Amazon SNS Topic"]
+        EC2 -->|"10s OS Metrics & Forensic Logs"| CWA["CloudWatch Agent (OOMScoreAdjust=-1000)"]
+        CWA -->|"Namespace: CWAgent"| CWM["CloudWatch Metrics (mem, swap, disk, diskio, iowait)"]
+        CWA -->|"Stream: instance-id/forensic-dumps"| CWL["CloudWatch Logs (/aws/ec2/.../os-forensics)"]
+        CWM -->|"Threshold Breached"| ALARMS["5 CloudWatch OS Alarms"]
+        ALARMS -->|"ALARM Notification"| SNS["Amazon SNS Topic"]
     end
 
     subgraph Response["3. Autonomous Investigation & Self-Healing"]
         SNS --> BRIDGE["AlarmToDevOpsAgentBridge Lambda"]
-        BRIDGE -->|1. Immediate Trigger| SSM_DUMP["SSM Runbook: OSForensicsAndSelfHeal"]
-        BRIDGE -->|2. Signed HMAC-SHA256 Webhook POST| DA["AWS DevOps Agent Space"]
-        DA -->|Correlates Metrics, Alarms & Forensic Logs| CWL
-        DA -.->|Can Also Invoke Runbook Directly| SSM_DUMP
-        SSM_DUMP -->|Writes OS Dumps to RAM tmpfs /var/log/da-forensics| EC2
-        SSM_DUMP -->|3. Terminates Runaway PIDs, Clears Disk Ballast & Cycles Swap| EC2
+        BRIDGE -->|"1. Immediate Trigger"| SSM_DUMP["SSM Runbook: OSForensicsAndSelfHeal"]
+        BRIDGE -->|"2. Signed HMAC-SHA256 Webhook POST"| DA["AWS DevOps Agent Space"]
+        DA -->|"Correlates Metrics, Alarms & Forensic Logs"| CWL
+        DA -.->|"Can Also Invoke Runbook Directly"| SSM_DUMP
+        SSM_DUMP -->|"Writes OS Dumps to RAM tmpfs /var/log/da-forensics"| EC2
+        SSM_DUMP -->|"3. Terminates Runaway PIDs, Clears Disk Ballast & Cycles Swap"| EC2
     end
 ```
 
