@@ -78,35 +78,14 @@ Parameters:
       Seconds to wait after capturing the initial forensic dump before self-healing terminates
       the runaway load (gives CloudWatch Metrics and DevOps Agent a sustained breach window).
 
-  MemoryThresholdPercent:
+  AnomalyDetectionBandWidth:
     Type: Number
-    Default: 80
-    MinValue: 50
-    MaxValue: 98
-    Description: CloudWatch Alarm threshold for mem_used_percent (%).
-
-  SwapThresholdPercent:
-    Type: Number
-    Default: 50
-    MinValue: 10
-    MaxValue: 98
-    Description: CloudWatch Alarm threshold for swap_used_percent (%).
-
-  DiskSpaceThresholdPercent:
-    Type: Number
-    Default: 85
-    MinValue: 50
-    MaxValue: 98
-    Description: CloudWatch Alarm threshold for root filesystem disk_used_percent (%).
-
-  EbsIoSatThresholdMs:
-    Type: Number
-    Default: 40000
-    MinValue: 5000
-    MaxValue: 60000
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
     Description: >-
-      CloudWatch Alarm threshold for diskio_io_time (ms of I/O activity per 60s period)
-      indicating EBS I/O & Throughput saturation.
+      CloudWatch Anomaly Detection band width (number of standard deviations from the expected
+      metric baseline) used in ANOMALY_DETECTION_BAND(m1, stdDevs) across all OS alarms.
 
 Conditions:
   ShouldAttachAgentRolePolicy: !Equals [!Ref AttachRunbookPolicyToAgentRole, 'true']
@@ -918,11 +897,27 @@ Resources:
                   return "EBS_IO"
               return "ALL"
 
+          def extract_metric_name(alarm_msg: dict) -> str:
+              trigger = alarm_msg.get("Trigger", {})
+              if trigger.get("MetricName"):
+                  return trigger["MetricName"]
+              for m in trigger.get("Metrics", []):
+                  metric_stat = m.get("MetricStat", {})
+                  metric = metric_stat.get("Metric", {})
+                  if metric.get("MetricName"):
+                      return metric["MetricName"]
+              return "OSMetric"
+
           def extract_instance_id(alarm_msg: dict, default_instance_id: str) -> str:
               trigger = alarm_msg.get("Trigger", {})
               for dim in trigger.get("Dimensions", []):
                   if dim.get("name") in ("InstanceId", "instance_id") or dim.get("Name") in ("InstanceId", "instance_id"):
                       return dim.get("value") or dim.get("Value")
+              for m in trigger.get("Metrics", []):
+                  dims = m.get("MetricStat", {}).get("Metric", {}).get("Dimensions", [])
+                  for dim in dims:
+                      if dim.get("name") in ("InstanceId", "instance_id") or dim.get("Name") in ("InstanceId", "instance_id"):
+                          return dim.get("value") or dim.get("Value")
               return default_instance_id
 
           def trigger_ssm_forensics_runbook(instance_id: str, breach_type: str, alarm_name: str, incident_id: str) -> str:
@@ -1016,12 +1011,12 @@ Resources:
                   except json.JSONDecodeError:
                       alarm_msg = {"AlarmName": "RawNotification", "NewStateValue": "ALARM", "NewStateReason": raw_msg}
 
-                  alarm_name = alarm_msg.get("AlarmName", "EC2-OS-Threshold-Alarm")
+                  alarm_name = alarm_msg.get("AlarmName", "EC2-OS-Anomaly-Alarm")
                   new_state = alarm_msg.get("NewStateValue", "ALARM")
-                  reason = alarm_msg.get("NewStateReason", "Threshold breached")
+                  reason = alarm_msg.get("NewStateReason", "Anomaly band upper threshold breached")
                   account_id = alarm_msg.get("AWSAccountId", context.invoked_function_arn.split(":")[4])
                   region = os.environ.get("AWS_REGION", "us-east-1")
-                  metric_name = alarm_msg.get("Trigger", {}).get("MetricName", "OSMetric")
+                  metric_name = extract_metric_name(alarm_msg)
 
                   instance_id = extract_instance_id(alarm_msg, default_instance)
                   breach_type = classify_breach(alarm_name, metric_name)
@@ -1048,9 +1043,9 @@ Resources:
                       "incidentId": incident_id,
                       "action": action,
                       "priority": "CRITICAL" if breach_type in ("SWAP", "DISK_SPACE") else "HIGH",
-                      "title": f"EC2 OS {breach_type} Exhaustion on {instance_id} ({alarm_name})",
+                      "title": f"EC2 OS {breach_type} Anomaly Detected on {instance_id} ({alarm_name})",
                       "description": (
-                          f"CloudWatch Alarm '{alarm_name}' transitioned to {new_state} on EC2 instance {instance_id}. "
+                          f"CloudWatch Anomaly Detection Alarm '{alarm_name}' transitioned to {new_state} on EC2 instance {instance_id}. "
                           f"Reason: {reason}. "
                           f"Automated SSM Forensic Runbook ({os.environ['FORENSIC_SSM_DOCUMENT']}) was triggered "
                           f"(CommandId: {ssm_command_id}) and streamed OS process/memory/swap/disk/IO dumps into "
@@ -1065,6 +1060,7 @@ Resources:
                               "instanceId": instance_id,
                               "instanceArn": f"arn:aws:ec2:{region}:{account_id}:instance/{instance_id}",
                               "alarmName": alarm_name,
+                              "alarmType": "CloudWatchAnomalyDetection",
                               "alarmState": new_state,
                               "breachCategory": breach_type,
                               "metricName": metric_name,
@@ -1099,7 +1095,7 @@ Resources:
   AlarmsSNSTopic:
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: !Sub ${AWS::StackName}-OS-Threshold-Alarms
+      TopicName: !Sub ${AWS::StackName}-OS-Anomaly-Alarms
 
   AlarmsSNSSubscription:
     Type: AWS::SNS::Subscription
@@ -1117,122 +1113,223 @@ Resources:
       SourceArn: !Ref AlarmsSNSTopic
 
   # ============================================================================
-  # 10. CLOUDWATCH OS ALARMS (MEMORY, SWAP, DISK SPACE, EBS I/O & THROUGHPUT)
+  # 10. CLOUDWATCH ANOMALY DETECTORS & ANOMALY-BASED OS ALARMS
+  #     (MEMORY, SWAP, DISK SPACE, EBS I/O & CPU IOWAIT STALL)
   # ============================================================================
-  HighMemoryAlarm:
-    Type: AWS::CloudWatch::Alarm
+  MemoryAnomalyDetector:
+    Type: AWS::CloudWatch::AnomalyDetector
     Properties:
-      AlarmName: !Sub ${AWS::StackName}-1-HighMemoryUtilization
-      AlarmDescription: >-
-        EC2 Physical Memory utilization breached threshold. Triggers SSM OS Forensics dump
-        to CloudWatch Logs and initiates AWS DevOps Agent autonomous investigation.
       Namespace: CWAgent
       MetricName: mem_used_percent
+      Statistic: Average
       Dimensions:
         - Name: InstanceId
           Value: !Ref TargetEC2Instance
-      Statistic: Average
-      Period: 60
+
+  HighMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: MemoryAnomalyDetector
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-1-MemoryAnomalyAlarm
+      AlarmDescription: >-
+        EC2 Physical Memory utilization exceeded the CloudWatch Anomaly Detection upper band.
+        Triggers SSM OS Forensics dump to CloudWatch Logs and initiates AWS DevOps Agent investigation.
       EvaluationPeriods: 1
       DatapointsToAlarm: 1
-      Threshold: !Ref MemoryThresholdPercent
-      ComparisonOperator: GreaterThanOrEqualToThreshold
+      ComparisonOperator: GreaterThanUpperThreshold
+      ThresholdMetricId: ad1
       TreatMissingData: notBreaching
+      Metrics:
+        - Id: m1
+          ReturnData: true
+          MetricStat:
+            Metric:
+              Namespace: CWAgent
+              MetricName: mem_used_percent
+              Dimensions:
+                - Name: InstanceId
+                  Value: !Ref TargetEC2Instance
+            Period: 60
+            Stat: Average
+        - Id: ad1
+          Expression: !Sub ANOMALY_DETECTION_BAND(m1, ${AnomalyDetectionBandWidth})
+          Label: mem_used_percent (Expected Band)
+          ReturnData: true
       AlarmActions:
         - !Ref AlarmsSNSTopic
       OKActions:
         - !Ref AlarmsSNSTopic
+
+  SwapAnomalyDetector:
+    Type: AWS::CloudWatch::AnomalyDetector
+    Properties:
+      Namespace: CWAgent
+      MetricName: swap_used_percent
+      Statistic: Average
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref TargetEC2Instance
 
   HighSwapAlarm:
     Type: AWS::CloudWatch::Alarm
+    DependsOn: SwapAnomalyDetector
     Properties:
-      AlarmName: !Sub ${AWS::StackName}-2-HighSwapUtilization
+      AlarmName: !Sub ${AWS::StackName}-2-SwapAnomalyAlarm
       AlarmDescription: >-
-        EC2 Swap utilization breached threshold (indicating memory exhaustion spillover & paging).
+        EC2 Swap utilization exceeded the CloudWatch Anomaly Detection upper band.
         Triggers SSM OS Forensics dump and AWS DevOps Agent investigation.
-      Namespace: CWAgent
-      MetricName: swap_used_percent
-      Dimensions:
-        - Name: InstanceId
-          Value: !Ref TargetEC2Instance
-      Statistic: Average
-      Period: 60
       EvaluationPeriods: 1
       DatapointsToAlarm: 1
-      Threshold: !Ref SwapThresholdPercent
-      ComparisonOperator: GreaterThanOrEqualToThreshold
+      ComparisonOperator: GreaterThanUpperThreshold
+      ThresholdMetricId: ad1
       TreatMissingData: notBreaching
+      Metrics:
+        - Id: m1
+          ReturnData: true
+          MetricStat:
+            Metric:
+              Namespace: CWAgent
+              MetricName: swap_used_percent
+              Dimensions:
+                - Name: InstanceId
+                  Value: !Ref TargetEC2Instance
+            Period: 60
+            Stat: Average
+        - Id: ad1
+          Expression: !Sub ANOMALY_DETECTION_BAND(m1, ${AnomalyDetectionBandWidth})
+          Label: swap_used_percent (Expected Band)
+          ReturnData: true
       AlarmActions:
         - !Ref AlarmsSNSTopic
       OKActions:
         - !Ref AlarmsSNSTopic
+
+  DiskSpaceAnomalyDetector:
+    Type: AWS::CloudWatch::AnomalyDetector
+    Properties:
+      Namespace: CWAgent
+      MetricName: disk_used_percent
+      Statistic: Average
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref TargetEC2Instance
 
   HighDiskSpaceAlarm:
     Type: AWS::CloudWatch::Alarm
+    DependsOn: DiskSpaceAnomalyDetector
     Properties:
-      AlarmName: !Sub ${AWS::StackName}-3-HighDiskSpaceUtilization
+      AlarmName: !Sub ${AWS::StackName}-3-DiskSpaceAnomalyAlarm
       AlarmDescription: >-
-        EC2 Root Filesystem disk usage breached threshold. Triggers SSM OS Forensics dump
-        (kept alive via tmpfs /var/log/da-forensics) and AWS DevOps Agent investigation.
-      Namespace: CWAgent
-      MetricName: disk_used_percent
-      Dimensions:
-        - Name: InstanceId
-          Value: !Ref TargetEC2Instance
-      Statistic: Average
-      Period: 60
+        EC2 Root Filesystem disk usage exceeded the CloudWatch Anomaly Detection upper band.
+        Triggers SSM OS Forensics dump (protected via tmpfs /var/log/da-forensics) and AWS DevOps Agent investigation.
       EvaluationPeriods: 1
       DatapointsToAlarm: 1
-      Threshold: !Ref DiskSpaceThresholdPercent
-      ComparisonOperator: GreaterThanOrEqualToThreshold
+      ComparisonOperator: GreaterThanUpperThreshold
+      ThresholdMetricId: ad1
       TreatMissingData: notBreaching
+      Metrics:
+        - Id: m1
+          ReturnData: true
+          MetricStat:
+            Metric:
+              Namespace: CWAgent
+              MetricName: disk_used_percent
+              Dimensions:
+                - Name: InstanceId
+                  Value: !Ref TargetEC2Instance
+            Period: 60
+            Stat: Average
+        - Id: ad1
+          Expression: !Sub ANOMALY_DETECTION_BAND(m1, ${AnomalyDetectionBandWidth})
+          Label: disk_used_percent (Expected Band)
+          ReturnData: true
       AlarmActions:
         - !Ref AlarmsSNSTopic
       OKActions:
         - !Ref AlarmsSNSTopic
+
+  EBSIOSaturationAnomalyDetector:
+    Type: AWS::CloudWatch::AnomalyDetector
+    Properties:
+      Namespace: CWAgent
+      MetricName: diskio_io_time
+      Statistic: Sum
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref TargetEC2Instance
 
   HighEBSIOSaturationAlarm:
     Type: AWS::CloudWatch::Alarm
+    DependsOn: EBSIOSaturationAnomalyDetector
     Properties:
-      AlarmName: !Sub ${AWS::StackName}-4-HighEBSIOSaturation
+      AlarmName: !Sub ${AWS::StackName}-4-EBSIOSaturationAnomalyAlarm
       AlarmDescription: >-
-        EC2 Disk I/O time (ms per minute) breached threshold, indicating EBS IOPS/Throughput saturation.
+        EC2 Disk I/O time exceeded the CloudWatch Anomaly Detection upper band, indicating EBS IOPS/Throughput saturation.
         Triggers SSM OS Forensics dump and AWS DevOps Agent investigation.
-      Namespace: CWAgent
-      MetricName: diskio_io_time
-      Dimensions:
-        - Name: InstanceId
-          Value: !Ref TargetEC2Instance
-      Statistic: Sum
-      Period: 60
       EvaluationPeriods: 1
       DatapointsToAlarm: 1
-      Threshold: !Ref EbsIoSatThresholdMs
-      ComparisonOperator: GreaterThanOrEqualToThreshold
+      ComparisonOperator: GreaterThanUpperThreshold
+      ThresholdMetricId: ad1
       TreatMissingData: notBreaching
+      Metrics:
+        - Id: m1
+          ReturnData: true
+          MetricStat:
+            Metric:
+              Namespace: CWAgent
+              MetricName: diskio_io_time
+              Dimensions:
+                - Name: InstanceId
+                  Value: !Ref TargetEC2Instance
+            Period: 60
+            Stat: Sum
+        - Id: ad1
+          Expression: !Sub ANOMALY_DETECTION_BAND(m1, ${AnomalyDetectionBandWidth})
+          Label: diskio_io_time (Expected Band)
+          ReturnData: true
       AlarmActions:
         - !Ref AlarmsSNSTopic
       OKActions:
         - !Ref AlarmsSNSTopic
 
-  HighCPUIoWaitStallAlarm:
-    Type: AWS::CloudWatch::Alarm
+  CPUIoWaitAnomalyDetector:
+    Type: AWS::CloudWatch::AnomalyDetector
     Properties:
-      AlarmName: !Sub ${AWS::StackName}-5-HighCPUIoWaitStall
-      AlarmDescription: >-
-        EC2 CPU I/O Wait exceeded 40%, indicating OS processes are stalling on saturated EBS I/O or swap thrashing.
       Namespace: CWAgent
       MetricName: cpu_usage_iowait
+      Statistic: Average
       Dimensions:
         - Name: InstanceId
           Value: !Ref TargetEC2Instance
-      Statistic: Average
-      Period: 60
+
+  HighCPUIoWaitStallAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: CPUIoWaitAnomalyDetector
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-5-CPUIoWaitAnomalyAlarm
+      AlarmDescription: >-
+        EC2 CPU I/O Wait exceeded the CloudWatch Anomaly Detection upper band, indicating OS processes are stalling on saturated EBS I/O or swap thrashing.
       EvaluationPeriods: 1
       DatapointsToAlarm: 1
-      Threshold: 40
-      ComparisonOperator: GreaterThanOrEqualToThreshold
+      ComparisonOperator: GreaterThanUpperThreshold
+      ThresholdMetricId: ad1
       TreatMissingData: notBreaching
+      Metrics:
+        - Id: m1
+          ReturnData: true
+          MetricStat:
+            Metric:
+              Namespace: CWAgent
+              MetricName: cpu_usage_iowait
+              Dimensions:
+                - Name: InstanceId
+                  Value: !Ref TargetEC2Instance
+            Period: 60
+            Stat: Average
+        - Id: ad1
+          Expression: !Sub ANOMALY_DETECTION_BAND(m1, ${AnomalyDetectionBandWidth})
+          Label: cpu_usage_iowait (Expected Band)
+          ReturnData: true
       AlarmActions:
         - !Ref AlarmsSNSTopic
       OKActions:

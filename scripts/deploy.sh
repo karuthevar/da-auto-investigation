@@ -13,6 +13,7 @@ WEBHOOK_URL="${DEVOPS_AGENT_WEBHOOK_URL:-https://placeholder.aidevops.amazonaws.
 WEBHOOK_SECRET="${DEVOPS_AGENT_WEBHOOK_SECRET:-PLACEHOLDER_WEBHOOK_SECRET_CHANGE_ME}"
 AGENT_ROLE_NAME="${DEVOPS_AGENT_ROLE_NAME:-AWS_DevOps_Agent_Role}"
 ENABLE_SELF_HEALING="${ENABLE_SELF_HEALING:-true}"
+ANOMALY_BAND_WIDTH="${ANOMALY_BAND_WIDTH:-2}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_FILE="${SCRIPT_DIR}/../cloudformation/da-auto-investigation-stack.yaml"
@@ -21,6 +22,7 @@ echo "=================================================================="
 echo " Deploying Stack : ${STACK_NAME}"
 echo " Region          : ${REGION}"
 echo " Instance Type   : ${INSTANCE_TYPE}"
+echo " Anomaly Band    : ${ANOMALY_BAND_WIDTH} std devs"
 echo "=================================================================="
 
 # 1. Auto-discover VPC if VPC_ID not provided
@@ -81,7 +83,8 @@ aws cloudformation deploy \
     DevOpsAgentWebhookSecret="${WEBHOOK_SECRET}" \
     DevOpsAgentRoleName="${AGENT_ROLE_NAME}" \
     AttachRunbookPolicyToAgentRole="${ATTACH_AGENT_POLICY}" \
-    EnableAutoSelfHealing="${ENABLE_SELF_HEALING}"
+    EnableAutoSelfHealing="${ENABLE_SELF_HEALING}" \
+    AnomalyDetectionBandWidth="${ANOMALY_BAND_WIDTH}"
 
 echo ""
 echo "=================================================================="

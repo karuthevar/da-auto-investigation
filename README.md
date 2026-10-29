@@ -157,17 +157,17 @@ aws lambda invoke \
 
 ---
 
-## CloudWatch Alarms & Thresholds
+## CloudWatch Anomaly Detection Alarms
 
-All metrics are published under the `CWAgent` namespace at **10-second** resolution and evaluated every **60 seconds**:
+Instead of hardcoded static thresholds, all 5 alarms use **Amazon CloudWatch Anomaly Detection** (`AWS::CloudWatch::AnomalyDetector` + `ANOMALY_DETECTION_BAND(m1, <StdDevs>)` with `ComparisonOperator: GreaterThanUpperThreshold`). Each metric is published under the `CWAgent` namespace at **10-second** resolution and evaluated every **60 seconds** against its learned upper anomaly band:
 
-| Alarm Name | Metric (`CWAgent`) | Default Threshold | Triggered Load Stage | Breach Category Passed to SSM & DevOps Agent |
+| Alarm Name | Metric (`CWAgent`) | Anomaly Detection Expression | Triggered Load Stage | Breach Category Passed to SSM & DevOps Agent |
 | :--- | :--- | :--- | :--- | :--- |
-| `<stack>-1-HighMemoryUtilization` | `mem_used_percent` | `>= 80%` | Stage 1 (`memory`) | `MEMORY` |
-| `<stack>-2-HighSwapUtilization` | `swap_used_percent` | `>= 50%` | Stage 2 (`swap`) | `SWAP` |
-| `<stack>-3-HighDiskSpaceUtilization` | `disk_used_percent` | `>= 85%` | Stage 3 (`disk_space`) | `DISK_SPACE` |
-| `<stack>-4-HighEBSIOSaturation` | `diskio_io_time` | `>= 40,000 ms/min` | Stage 4 (`ebs_io`) | `EBS_IO` |
-| `<stack>-5-HighCPUIoWaitStall` | `cpu_usage_iowait` | `>= 40%` | Stage 2 & Stage 4 | `EBS_IO` |
+| `<stack>-1-MemoryAnomalyAlarm` | `mem_used_percent` (`Average`) | `GreaterThanUpperThreshold` (`ANOMALY_DETECTION_BAND(m1, 2)`) | Stage 1 (`memory`) | `MEMORY` |
+| `<stack>-2-SwapAnomalyAlarm` | `swap_used_percent` (`Average`) | `GreaterThanUpperThreshold` (`ANOMALY_DETECTION_BAND(m1, 2)`) | Stage 2 (`swap`) | `SWAP` |
+| `<stack>-3-DiskSpaceAnomalyAlarm` | `disk_used_percent` (`Average`) | `GreaterThanUpperThreshold` (`ANOMALY_DETECTION_BAND(m1, 2)`) | Stage 3 (`disk_space`) | `DISK_SPACE` |
+| `<stack>-4-EBSIOSaturationAnomalyAlarm` | `diskio_io_time` (`Sum`) | `GreaterThanUpperThreshold` (`ANOMALY_DETECTION_BAND(m1, 2)`) | Stage 4 (`ebs_io`) | `EBS_IO` |
+| `<stack>-5-CPUIoWaitAnomalyAlarm` | `cpu_usage_iowait` (`Average`) | `GreaterThanUpperThreshold` (`ANOMALY_DETECTION_BAND(m1, 2)`) | Stage 2 & Stage 4 | `EBS_IO` |
 
 ---
 
@@ -215,6 +215,7 @@ You can override any parameter via environment variables when running `./scripts
 | `DEVOPS_AGENT_WEBHOOK_SECRET` | `DevOpsAgentWebhookSecret` | Placeholder Secret | HMAC-SHA256 secret for signing webhook requests |
 | `DEVOPS_AGENT_ROLE_NAME` | `DevOpsAgentRoleName` | `AWS_DevOps_Agent_Role` | Existing DevOps Agent IAM role in the account |
 | `ENABLE_SELF_HEALING` | `EnableAutoSelfHealing` | `true` | Automatically remediate runaway processes after dumping forensics |
+| `ANOMALY_BAND_WIDTH` | `AnomalyDetectionBandWidth` | `2` | Standard deviations (`1`–`10`) for `ANOMALY_DETECTION_BAND(m1, stdDevs)` |
 
 ---
 
