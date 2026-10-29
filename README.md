@@ -171,15 +171,18 @@ Instead of hardcoded static thresholds, all 5 alarms use **Amazon CloudWatch Ano
 
 ---
 
-## Observing Forensic Dumps & Self-Healing
+## Automatic Streaming of OS Forensic Dumps & Self-Healing Output to CloudWatch Logs
 
-Stream the real-time OS forensic dumps and self-healing output in AWS CloudShell:
+All operating system forensic dumps, load injection logs, and self-healing remediation outputs are **automatically streamed in real time from the EC2 instance into Amazon CloudWatch Logs** under Log Group:
 
-```bash
-aws logs tail /aws/ec2/da-auto-investigation/os-forensics --follow
-```
+- **CloudWatch Log Group**: `/aws/ec2/da-auto-investigation/os-forensics`
+  - **Stream `{instance_id}/forensic-dumps`**: Shipped continuously by the on-box **CloudWatch Agent** from the RAM-backed `tmpfs` file `/var/log/da-forensics/forensics.log` (`force_flush_interval: 5s`).
+  - **Stream `{instance_id}/load-generator`**: Shipped by the **CloudWatch Agent** from `/var/log/da-forensics/load-generator.log`.
+  - **SSM Run Command Direct Output Streams**: Every `ssm:SendCommand` invocation (`OSForensicsAndSelfHeal` and `InduceOSLoad`) also enables `CloudWatchOutputConfig` to stream `stdout`/`stderr` directly into `/aws/ec2/da-auto-investigation/os-forensics`.
 
-### Example Log Stream Output (`{instance_id}/forensic-dumps`)
+When an anomaly alarm fires, the `AlarmToDevOpsAgentBridge` Lambda includes this CloudWatch Log Group and stream name in the signed webhook payload so the **AWS DevOps Agent** automatically queries CloudWatch Logs during its root-cause investigation.
+
+### Example Forensic Log Stream Output in CloudWatch Logs (`{instance_id}/forensic-dumps`)
 
 ```text
 ================================================================================

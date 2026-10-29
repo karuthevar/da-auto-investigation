@@ -195,10 +195,14 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
+                  - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
+                  - logs:DescribeLogGroups
                   - logs:DescribeLogStreams
-                Resource: !GetAtt OSForensicsLogGroup.Arn
+                Resource:
+                  - !GetAtt OSForensicsLogGroup.Arn
+                  - !Sub ${OSForensicsLogGroup.Arn}:*
 
   EC2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -787,6 +791,7 @@ Resources:
         Variables:
           TARGET_INSTANCE_ID: !Ref TargetEC2Instance
           SSM_LOAD_DOCUMENT: !Ref InduceOSLoadDocument
+          FORENSICS_LOG_GROUP: !Ref OSForensicsLogGroup
       Code:
         ZipFile: |
           import os
@@ -819,6 +824,7 @@ Resources:
               duration = str(int(event.get("duration_seconds", 90)))
               instance_id = event.get("instance_id") or os.environ["TARGET_INSTANCE_ID"]
               document_name = os.environ["SSM_LOAD_DOCUMENT"]
+              log_group = os.environ["FORENSICS_LOG_GROUP"]
 
               response = ssm.send_command(
                   InstanceIds=[instance_id],
@@ -827,6 +833,10 @@ Resources:
                   Parameters={
                       "LoadMode": [mode],
                       "DurationSeconds": [duration]
+                  },
+                  CloudWatchOutputConfig={
+                      "CloudWatchLogGroupName": log_group,
+                      "CloudWatchOutputEnabled": True
                   }
               )
 
@@ -837,7 +847,8 @@ Resources:
                   "instanceId": instance_id,
                   "mode": mode,
                   "stageDurationSeconds": int(duration),
-                  "ssmDocument": document_name
+                  "ssmDocument": document_name,
+                  "cloudWatchLogGroup": log_group
               }
               print(json.dumps(result))
               return {
@@ -955,6 +966,7 @@ Resources:
 
           def trigger_ssm_forensics_runbook(instance_id: str, breach_type: str, alarm_name: str, incident_id: str) -> str:
               doc_name = os.environ["FORENSIC_SSM_DOCUMENT"]
+              log_group = os.environ["FORENSICS_LOG_GROUP"]
               enable_heal = os.environ.get("ENABLE_SELF_HEALING", "true")
               heal_delay = os.environ.get("SELF_HEAL_DELAY_SECONDS", "30")
               try:
@@ -968,10 +980,14 @@ Resources:
                           "IncidentId": [incident_id],
                           "EnableSelfHealing": [enable_heal],
                           "HealDelaySeconds": [heal_delay]
+                      },
+                      CloudWatchOutputConfig={
+                          "CloudWatchLogGroupName": log_group,
+                          "CloudWatchOutputEnabled": True
                       }
                   )
                   cmd_id = resp["Command"]["CommandId"]
-                  print(f"Triggered SSM Forensic Runbook {doc_name} on {instance_id}: CommandId={cmd_id}")
+                  print(f"Triggered SSM Forensic Runbook {doc_name} on {instance_id}: CommandId={cmd_id} -> streaming to CloudWatch Log Group {log_group}")
                   return cmd_id
               except Exception as exc:
                   print(f"Warning: Failed to trigger SSM Forensic Runbook on {instance_id}: {exc}")
@@ -1427,8 +1443,8 @@ aws lambda invoke \
 
 cat "${RESPONSE_FILE}" | jq . 2>/dev/null || cat "${RESPONSE_FILE}"
 echo ""
-echo "[i] Tail live OS forensics and load logs in CloudWatch Logs:"
-echo "    aws logs tail /aws/ec2/${STACK_NAME}/os-forensics --follow --region ${REGION}"
+echo "[i] OS forensic dumps and self-healing logs are automatically streamed to Amazon CloudWatch Logs:"
+echo "    Log Group: /aws/ec2/${STACK_NAME}/os-forensics"
 EOF_TRIGGER
 chmod +x "${WORKDIR}/trigger-load.sh"
 
@@ -1520,6 +1536,7 @@ echo ""
 echo " 3. Stop All Load Immediately:"
 echo "    ~/da-auto-investigation/trigger-load.sh stop"
 echo ""
-echo " 4. Stream Live OS Forensic Dumps & Self-Healing Logs:"
-echo "    aws logs tail /aws/ec2/${STACK_NAME}/os-forensics --follow --region ${REGION}"
+echo " [i] All OS Forensic Dumps & Self-Healing outputs stream automatically"
+echo "     from the EC2 instance into Amazon CloudWatch Logs:"
+echo "     Log Group: /aws/ec2/${STACK_NAME}/os-forensics"
 echo "=================================================================="

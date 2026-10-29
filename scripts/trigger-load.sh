@@ -26,5 +26,5 @@ aws lambda invoke \
 
 cat "${RESPONSE_FILE}" | jq . 2>/dev/null || cat "${RESPONSE_FILE}"
 echo ""
-echo "[i] Tail live OS forensics and load logs in CloudWatch Logs:"
-echo "    aws logs tail /aws/ec2/${STACK_NAME}/os-forensics --follow --region ${REGION}"
+echo "[i] OS forensic dumps and self-healing logs are automatically streamed to Amazon CloudWatch Logs:"
+echo "    Log Group: /aws/ec2/${STACK_NAME}/os-forensics"
